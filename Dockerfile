@@ -19,7 +19,7 @@ RUN cargo build --release
 FROM debian:stable-slim
 
 ENV RUST_LOG="error,wkd_server=info"
-COPY --from=build --chown=nonroot:nonroot /build/target/release/wkd-server /usr/local/bin/
+COPY --from=build /build/target/release/wkd-server /usr/local/bin/
 
 EXPOSE 8080
 
