@@ -83,8 +83,20 @@ fn read_certs(path: &Path) -> Result<Vec<Cert>> {
     ));
 
     // Use CertParser to handle multiple concatenated certificates
+    let parser = match CertParser::from_reader(reader) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                "Could not parse certificates in {}: {}",
+                path.to_string_lossy(),
+                e
+            );
+            return Ok(vec![]);
+        }
+    };
+
     let mut certs = Vec::new();
-    for cert_result in CertParser::from_reader(reader)? {
+    for cert_result in parser {
         match cert_result {
             Ok(cert) => certs.push(cert),
             Err(e) => warn!(
