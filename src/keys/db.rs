@@ -27,7 +27,7 @@ pub struct CertEntry {
     pub path: OsString,
 }
 
-type Cache = HashMap<CertKey, CertEntry>;
+type Cache = HashMap<CertKey, Vec<CertEntry>>;
 
 pub struct KeyDb {
     _watcher: RecommendedWatcher,
@@ -136,7 +136,7 @@ impl KeyDb {
         path: &Path,
         split_keys: bool,
     ) -> Result<()> {
-        // first, we remove all files that might be in here still because of this path
+        // first, we remove all entries that came from this path
         Self::remove_file_from_cache(cache, path)?;
 
         let entries = read_key_file(path, split_keys).context("Reading file")?;
@@ -144,21 +144,24 @@ impl KeyDb {
             info!("Ignoring file {}, no entries found", path.to_string_lossy());
             return Ok(());
         }
-        entries.into_iter().for_each(|(entry, content)| {
+        entries.into_iter().for_each(|(key, entry)| {
             info!(
                 "Adding key '{}@{}' from file {} to db",
-                content.username,
-                entry.domain,
+                entry.username,
+                key.domain,
                 path.to_string_lossy()
             );
-            cache.insert(entry, content);
+            cache.entry(key).or_default().push(entry);
         });
         Ok(())
     }
 
     fn remove_file_from_cache(cache: &mut RwLockWriteGuard<Cache>, path: &Path) -> Result<()> {
-        // we remove all items that were inserted into the map because of this file.
-        cache.retain(|_, v| v.path != path.as_os_str());
+        // Remove entries from this path, and clean up empty keys
+        for entries in cache.values_mut() {
+            entries.retain(|e| e.path != path.as_os_str());
+        }
+        cache.retain(|_, v| !v.is_empty());
         Ok(())
     }
 
@@ -168,7 +171,7 @@ impl KeyDb {
         domain: &str,
         username: Option<&String>,
     ) -> Result<Option<Vec<u8>>> {
-        let value = self
+        let entries = self
             .keys
             .read()
             .await
@@ -178,14 +181,35 @@ impl KeyDb {
             })
             .cloned();
 
-        match (username, value) {
-            (Some(requested), Some(CertEntry { username, .. })) if requested != &username => {
+        let Some(entries) = entries else {
+            return Ok(None);
+        };
+
+        // Filter by username if provided (for advanced method)
+        let filtered: Vec<_> = if let Some(requested) = username {
+            entries
+                .into_iter()
+                .filter(|e| &e.username == requested)
+                .collect()
+        } else {
+            entries
+        };
+
+        if filtered.is_empty() {
+            if let Some(requested) = username {
                 info!(
-                    "hash matched for '{username}@{domain}', but requested local part '{requested}' did not match. Ignoring."
+                    "hash matched for domain '{domain}', but requested local part '{requested}' did not match any entries. Ignoring."
                 );
-                Ok(None)
             }
-            (_, value) => Ok(value.map(|entry| entry.cert.to_vec().unwrap())),
+            return Ok(None);
         }
+
+        // Concatenate all certs into a single binary response
+        let mut result = Vec::new();
+        for entry in filtered {
+            result.extend(entry.cert.to_vec()?);
+        }
+
+        Ok(Some(result))
     }
 }
