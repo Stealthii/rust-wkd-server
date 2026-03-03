@@ -1,7 +1,8 @@
 use crate::keys::fs::read_key_file;
 use anyhow::{Context, Result, bail};
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
-use notify::{EventKind, RecommendedWatcher, Watcher};
+use notify::{EventKind, RecursiveMode};
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use sequoia_openpgp::Cert;
 use sequoia_openpgp::serialize::SerializeInto;
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ pub struct CertEntry {
 type Cache = HashMap<CertKey, Vec<CertEntry>>;
 
 pub struct KeyDb {
-    _watcher: RecommendedWatcher,
+    _watcher: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
     keys: Arc<RwLock<Cache>>,
 }
 
@@ -42,25 +43,31 @@ impl KeyDb {
 
         let cache = Arc::new(RwLock::new(HashMap::new()));
 
-        let (tx, rx) = channel();
+        let (tx, rx) = channel::<DebounceEventResult>();
 
         let inner_cache = cache.clone();
-        let mut watcher = notify::recommended_watcher(tx)?;
+        let mut watcher = new_debouncer(std::time::Duration::from_millis(500), None, tx)?;
 
-        watcher.watch(key_path, notify::RecursiveMode::Recursive)?;
+        watcher.watch(key_path, RecursiveMode::Recursive)?;
 
         task::spawn(async move {
-            while let Ok(event) = rx.recv() {
-                match event {
-                    Ok(event) => {
-                        debug!("event: {:?}", event);
-                        if let Err(e) =
-                            Self::handle_file_event(&inner_cache, event, split_keys).await
-                        {
-                            error!("Error while handling file event: {:?}", e);
+            while let Ok(result) = rx.recv() {
+                match result {
+                    Ok(events) => {
+                        for event in events {
+                            debug!("event: {:?}", event);
+                            if let Err(e) =
+                                Self::handle_file_event(&inner_cache, event.event, split_keys).await
+                            {
+                                error!("Error while handling file event: {:?}", e);
+                            }
                         }
                     }
-                    Err(error) => error!("watch error: {:?}", error),
+                    Err(errors) => {
+                        for error in errors {
+                            error!("watch error: {:?}", error);
+                        }
+                    }
                 }
             }
         });
